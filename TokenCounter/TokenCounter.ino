@@ -3,7 +3,7 @@
 // Buttons: 4 tactile switches, active LOW (INPUT_PULLUP)
 
 // ── Display pins ──────────────────────────────────────────────────────────────
-const int SEG[]  = {2, 3, 4, 5, 6, 8, 13}; // A F B E D C G
+const int SEG[]  = {2, 3, 4, 5, 6, 8, 13}; // A F B E D C G  (indices 0–6)
 const int DIG[]  = {9, 10, 11, 12};          // Digit 1-4 (left→right)
 const int DP_PIN = 7;                         // Decimal point (used as separator)
 
@@ -29,24 +29,85 @@ const int BTN_RIGHT  = A3;
 const int BUTTONS[4] = {BTN_TOP, BTN_BOTTOM, BTN_LEFT, BTN_RIGHT};
 
 // ── Timing constants ──────────────────────────────────────────────────────────
-const unsigned long DEBOUNCE_MS  = 20;
+const unsigned long DEBOUNCE_MS   = 20;
 const unsigned long LONG_PRESS_MS = 500;
-const unsigned long MUX_STEP_US  = 2500; // ~2.5 ms per digit → ~100 Hz refresh
+const unsigned long MUX_STEP_US   = 2500; // ~2.5 ms per digit → ~100 Hz refresh
+const unsigned long ANIM_STEP_MS  = 80;   // ms per animation frame (~1s per revolution)
+
+// ── Startup animation ─────────────────────────────────────────────────────────
+//
+// The outer perimeter of 4 digits forms a 12-segment clockwise loop:
+//
+//   [A0][A1][A2][A3]
+//    F0              B3
+//    E0              C3
+//   [D0][D1][D2][D3]
+//
+// Each entry is {digit index, seg array index}
+// SEG array order: A=0, F=1, B=2, E=3, D=4, C=5, G=6
+//
+const byte PERIM[12][2] = {
+  {0, 0}, // A of digit 0  (top-left)
+  {1, 0}, // A of digit 1
+  {2, 0}, // A of digit 2
+  {3, 0}, // A of digit 3  (top-right)
+  {3, 2}, // B of digit 3  (right-top)
+  {3, 5}, // C of digit 3  (right-bottom)
+  {3, 4}, // D of digit 3  (bottom-right)
+  {2, 4}, // D of digit 2
+  {1, 4}, // D of digit 1
+  {0, 4}, // D of digit 0  (bottom-left)
+  {0, 3}, // E of digit 0  (left-bottom)
+  {0, 1}, // F of digit 0  (left-top)
+};
+
+bool animating = true;
+int  animPos   = 0;
+byte animSegs[4]; // per-digit segment bitmask during animation (bit N = SEG[N] on)
+
+// Build animSegs for the current frame: light 2 consecutive perimeter segments
+void buildAnimFrame() {
+  memset(animSegs, 0, sizeof(animSegs));
+  for (int i = 0; i < 2; i++) {
+    int p = (animPos + i) % 12;
+    animSegs[PERIM[p][0]] |= (1 << PERIM[p][1]);
+  }
+}
 
 // ── Button state ──────────────────────────────────────────────────────────────
-int  lastRaw[4]       = {HIGH, HIGH, HIGH, HIGH};
-int  stable[4]        = {HIGH, HIGH, HIGH, HIGH};
+int  lastRaw[4]      = {HIGH, HIGH, HIGH, HIGH};
+int  stable[4]       = {HIGH, HIGH, HIGH, HIGH};
 unsigned long lastChange[4]  = {0, 0, 0, 0};
 unsigned long pressStart[4]  = {0, 0, 0, 0};
-bool longFired[4]     = {false, false, false, false};
-bool wasPressed[4]    = {false, false, false, false};
+bool longFired[4]    = {false, false, false, false};
+bool wasPressed[4]   = {false, false, false, false};
+
+// ── Konami sequence (arrow-only: ↑↑↓↓←→←→) ───────────────────────────────────
+// Button indices: TOP=0, BOTTOM=1, LEFT=2, RIGHT=3
+const byte KONAMI[8] = {0, 0, 1, 1, 2, 3, 2, 3};
+byte konamiBuffer[8] = {255, 255, 255, 255, 255, 255, 255, 255};
+int  konamiPos = 0;
+
+void konamiRecord(int btn) {
+  konamiBuffer[konamiPos] = btn;
+  konamiPos = (konamiPos + 1) % 8;
+  // Check if the last 8 presses match the sequence
+  for (int i = 0; i < 8; i++) {
+    if (konamiBuffer[(konamiPos + i) % 8] != KONAMI[i]) return;
+  }
+  // Match — trigger animation and wipe buffer
+  animating = true;
+  animPos   = 0;
+  buildAnimFrame();
+  memset(konamiBuffer, 255, sizeof(konamiBuffer));
+}
 
 // ── Counter state ─────────────────────────────────────────────────────────────
 int untapped = 0;
 int tapped   = 0;
 
 // ── Display buffer ────────────────────────────────────────────────────────────
-int digits[4]; // digit values to show
+int digits[4];
 
 void updateDisplay() {
   digits[0] = (untapped / 10) % 10;
@@ -58,38 +119,19 @@ void updateDisplay() {
 // ── Action handlers ───────────────────────────────────────────────────────────
 void handleShort(int btn) {
   switch (btn) {
-    case 0: // TOP — +1 untapped
-      untapped = min(untapped + 1, 99);
-      break;
-    case 1: // BOTTOM — -1 untapped
-      untapped = max(untapped - 1, 0);
-      break;
-    case 2: // LEFT — untap 1
-      if (tapped > 0) { tapped--; untapped++; }
-      break;
-    case 3: // RIGHT — tap 1
-      if (untapped > 0) { untapped--; tapped++; }
-      break;
+    case 0: untapped = min(untapped + 1, 99); break;          // TOP    — +1 untapped
+    case 1: untapped = max(untapped - 1, 0);  break;          // BOTTOM — -1 untapped
+    case 2: if (tapped   > 0) { tapped--;   untapped++; } break; // LEFT   — untap 1
+    case 3: if (untapped > 0) { untapped--; tapped++;   } break; // RIGHT  — tap 1
   }
 }
 
 void handleLong(int btn) {
   switch (btn) {
-    case 0: // TOP hold — +2 untapped
-      untapped = min(untapped + 2, 99);
-      break;
-    case 1: // BOTTOM hold — reset
-      untapped = 0;
-      tapped   = 0;
-      break;
-    case 2: // LEFT hold — untap all
-      untapped += tapped;
-      tapped    = 0;
-      break;
-    case 3: // RIGHT hold — tap all
-      tapped  += untapped;
-      untapped = 0;
-      break;
+    case 0: untapped = min(untapped + 2, 99); break; // TOP hold    — +2 untapped
+    case 1: untapped = 0; tapped = 0;         break; // BOTTOM hold — reset
+    case 2: untapped += tapped; tapped = 0;   break; // LEFT hold   — untap all
+    case 3: tapped += untapped; untapped = 0; break; // RIGHT hold  — tap all
   }
 }
 
@@ -98,10 +140,11 @@ void setup() {
   for (int i = 0; i < 7; i++) { pinMode(SEG[i], OUTPUT); digitalWrite(SEG[i], HIGH); }
   for (int i = 0; i < 4; i++) { pinMode(DIG[i], OUTPUT); digitalWrite(DIG[i], LOW); }
   pinMode(DP_PIN, OUTPUT);
-  digitalWrite(DP_PIN, HIGH); // DP off by default
+  digitalWrite(DP_PIN, HIGH);
 
   for (int i = 0; i < 4; i++) pinMode(BUTTONS[i], INPUT_PULLUP);
 
+  buildAnimFrame();
   updateDisplay();
 }
 
@@ -119,11 +162,19 @@ void loop() {
     if (now - lastChange[i] < DEBOUNCE_MS) continue;
 
     if (raw == LOW && !wasPressed[i]) {
-      // just pressed
-      wasPressed[i]  = true;
-      pressStart[i]  = now;
-      longFired[i]   = false;
+      wasPressed[i] = true;
+      pressStart[i] = now;
+      longFired[i]  = false;
+
+      // Any press dismisses the animation immediately
+      if (animating) {
+        animating = false;
+        updateDisplay();
+      }
     }
+
+    // Skip long-press / short-press logic while animating
+    if (animating) { if (raw != stable[i]) stable[i] = raw; continue; }
 
     if (raw == LOW && wasPressed[i] && !longFired[i]) {
       if (now - pressStart[i] >= LONG_PRESS_MS) {
@@ -134,18 +185,24 @@ void loop() {
     }
 
     if (raw == HIGH && wasPressed[i]) {
-      // released
-      if (!longFired[i]) {
-        handleShort(i);
-        updateDisplay();
-      }
+      if (!longFired[i]) { handleShort(i); updateDisplay(); konamiRecord(i); }
       wasPressed[i] = false;
     }
 
     if (raw != stable[i]) stable[i] = raw;
   }
 
-  // — Display multiplexing (non-blocking, one digit per loop pass) —
+  // — Animation step —
+  if (animating) {
+    static unsigned long lastAnimStep = 0;
+    if (now - lastAnimStep >= ANIM_STEP_MS) {
+      lastAnimStep = now;
+      animPos = (animPos + 1) % 12;
+      buildAnimFrame();
+    }
+  }
+
+  // — Display multiplexing —
   static int curDigit = 0;
   static unsigned long lastMux = 0;
 
@@ -155,15 +212,21 @@ void loop() {
     // blank previous digit
     digitalWrite(DIG[(curDigit + 3) % 4], LOW);
 
-    // enable decimal point between digit 2 and 3 as separator
-    digitalWrite(DP_PIN, curDigit == 1 ? LOW : HIGH);
+    if (animating) {
+      // Drive segments from animation bitmask; DP always off during animation
+      digitalWrite(DP_PIN, HIGH);
+      for (int s = 0; s < 7; s++) {
+        digitalWrite(SEG[s], (animSegs[curDigit] & (1 << s)) ? LOW : HIGH);
+      }
+    } else {
+      // Normal counter display
+      digitalWrite(DP_PIN, curDigit == 1 ? LOW : HIGH);
+      for (int s = 0; s < 7; s++) {
+        digitalWrite(SEG[s], PATTERNS[digits[curDigit]][s]);
+      }
+    }
 
-    // write segments for current digit
-    for (int s = 0; s < 7; s++) digitalWrite(SEG[s], PATTERNS[digits[curDigit]][s]);
-
-    // enable digit
     digitalWrite(DIG[curDigit], HIGH);
-
     curDigit = (curDigit + 1) % 4;
   }
 }
